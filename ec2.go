@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/dustin/go-humanize"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type Instance struct {
@@ -90,16 +93,40 @@ func (instance *Instance) CheckConnectivity(callback func(instance *Instance)) {
 		go func() {
 			instance.connectableLock.Lock()
 			defer instance.connectableLock.Unlock()
-			conn, err := net.DialTimeout("tcp", *instance.privateIpAddress+":22", time.Second*3)
-			if err != nil {
-				instance.connectableChecked = true
-				callback(instance)
-				return
+
+			config := &ssh.ClientConfig{
+				User:            "ubuntu",
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			}
-			conn.Close()
-			instance.connectable = true
-			instance.connectableChecked = true
-			callback(instance)
+
+			authSock := os.Getenv("SSH_AUTH_SOCK")
+			// There's SSH Agent present
+			if len(authSock) > 0 {
+				conn, err := net.Dial("unix", authSock)
+				if err == nil {
+					agentClient := agent.NewClient(conn)
+					config.Auth = []ssh.AuthMethod{
+						ssh.PublicKeysCallback(agentClient.Signers),
+					}
+				}
+			}
+
+			client, err := ssh.Dial("tcp", *instance.privateIpAddress+":22", config)
+			if err != nil {
+				// XXX(serialx): I hate golang error type system
+				if strings.HasPrefix(err.Error(), "ssh: handshake failed: ssh: unable to authenticate") {
+					instance.connectable = true
+					instance.connectableChecked = true
+					callback(instance)
+					return
+				} else {
+					panic(err)
+					instance.connectableChecked = true
+					callback(instance)
+					return
+				}
+			}
+			client.Conn.Close()
 		}()
 	}
 }
