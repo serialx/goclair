@@ -3,7 +3,9 @@ package goclair
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"syscall"
 
 	"github.com/jroimartin/gocui"
 )
@@ -125,6 +127,24 @@ func (ctrl *InstanceController) space(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (ctrl *InstanceController) enter(g *gocui.Gui, v *gocui.View) error {
+	instances := ctrl.selectedInstances()
+	if len(instances) == 0 {
+		ctrl.curInstance.SetSelected(true)
+		instances = ctrl.selectedInstances()
+	}
+	for _, instance := range instances {
+		connCmd, err := instance.ConnectCommand()
+		if err != nil {
+			continue
+		}
+		g.Close()
+		fmt.Println(connCmd)
+		args := []string{"/bin/bash", "-c", connCmd}
+		env := os.Environ()
+		syscall.Exec("/bin/bash", args, env)
+		os.Exit(0)
+		break
+	}
 	return nil
 }
 
@@ -168,6 +188,9 @@ func (ctrl *InstanceController) layout(g *gocui.Gui) error {
 				highlighted := i == ctrl.newCursorY && colIdx == ctrl.newCursorX
 				if highlighted {
 					ctrl.curInstance = instance
+					instance.CheckConnectivity(func(instance *Instance) {
+						ctrl.RefreshView()
+					})
 				}
 				ctrl.renderItem(views[colIdx], highlighted, instance, colWidth)
 			}
@@ -222,4 +245,14 @@ func (ctrl *InstanceController) renderItem(writer io.Writer, highlighted bool, i
 		fmt.Fprint(writer, defaultBg)
 	}
 	fmt.Fprint(writer, "\n")
+}
+
+func (ctrl InstanceController) selectedInstances() []*Instance {
+	selected := make([]*Instance, 0)
+	for _, instance := range ctrl.instances {
+		if instance.Selected() {
+			selected = append(selected, instance)
+		}
+	}
+	return selected
 }

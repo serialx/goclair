@@ -1,9 +1,12 @@
 package goclair
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -12,10 +15,13 @@ import (
 )
 
 type Instance struct {
-	name             string
-	privateIpAddress *string
-	selected         bool
-	launchTime       time.Time
+	name               string
+	privateIpAddress   *string
+	selected           bool
+	launchTime         time.Time
+	connectableLock    sync.Mutex
+	connectableChecked bool
+	connectable        bool
 }
 
 type ByName []*Instance
@@ -62,7 +68,13 @@ func GetInstances() []*Instance {
 func (instance *Instance) Label() string {
 	humanTime := humanize.Time(instance.launchTime)
 	humanTime = strings.Replace(humanTime, " ago", "", 1)
-	return fmt.Sprintf("%s [%s]", instance.name, humanTime)
+	tags := ""
+	if instance.connectable {
+		tags += " ✓"
+	} else if instance.connectableChecked && !instance.connectable {
+		tags += " x"
+	}
+	return fmt.Sprintf("%s [%s]%s", instance.name, humanTime, tags)
 }
 
 func (instance Instance) Selected() bool {
@@ -71,4 +83,31 @@ func (instance Instance) Selected() bool {
 
 func (instance *Instance) SetSelected(selected bool) {
 	instance.selected = selected
+}
+
+func (instance *Instance) CheckConnectivity(callback func(instance *Instance)) {
+	if instance.privateIpAddress != nil && !instance.connectable {
+		go func() {
+			instance.connectableLock.Lock()
+			defer instance.connectableLock.Unlock()
+			conn, err := net.DialTimeout("tcp", *instance.privateIpAddress+":22", time.Second*3)
+			if err != nil {
+				instance.connectableChecked = true
+				callback(instance)
+				return
+			}
+			conn.Close()
+			instance.connectable = true
+			instance.connectableChecked = true
+			callback(instance)
+		}()
+	}
+}
+
+func (instance *Instance) ConnectCommand() (string, error) {
+	if instance.privateIpAddress != nil && instance.connectable {
+		addr := *instance.privateIpAddress
+		return fmt.Sprintf("ssh -p %d %s@%s", 22, "ubuntu", addr), nil
+	}
+	return "", errors.New("No connection info")
 }
